@@ -16,7 +16,9 @@
             </div>
             <div class="input-field">
                 <label for="style-name">スタイル名</label>
-                <input type="text" id="style-name" name="style-name">
+                <select id="style-name" name="style-name" disabled>
+                    <option value="">モデルを選択してください</option>
+                </select>
             </div>
         </div>
         <div class="script-container">
@@ -27,9 +29,9 @@
             <button id="synthesize-button" class="synthesize-button">
                 音声合成
             </button>
-        </div>
-        <div id="response-container" class="response-container">
-            <!-- レスポンスがここに表示されます -->
+            <button id="cancel-button" class="cancel-button" style="display: none;">
+                キャンセル
+            </button>
         </div>
         <div id="audio-container" class="audio-container">
             <!-- 音声プレーヤーがここに表示されます -->
@@ -37,18 +39,104 @@
     </div>
 
     <script>
+        // モデル名とスタイル名のデータを保持する変数
+        let modelData = null;
+        // 中断用のAbortController
+        let abortController = null;
+
+        // キャンセルボタンのイベントリスナー
+        document.getElementById('cancel-button').addEventListener('click', () => {
+            if (abortController) {
+                abortController.abort();
+                // ローディング表示をクリア
+                const audioContainer = document.getElementById('audio-container');
+                audioContainer.innerHTML = '';
+                // ボタンの状態を元に戻す
+                document.getElementById('synthesize-button').disabled = false;
+                document.getElementById('cancel-button').style.display = 'none';
+                abortController = null;
+            }
+        });
+
+        // ページ読み込み時にスピーカー情報を取得
+        async function loadSpeakerData() {
+            try {
+                const response = await fetch('http://127.0.0.1:10101/speakers');
+                modelData = await response.json();
+            } catch (error) {
+                console.error('スピーカー情報の取得に失敗しました:', error);
+            }
+        }
+
+        // モデル名が変更されたときにスタイル名のセレクトボックスを更新
+        document.getElementById('model-name').addEventListener('input', (e) => {
+            const modelName = e.target.value;
+            const styleSelect = document.getElementById('style-name');
+            
+            if (!modelData) {
+                styleSelect.disabled = true;
+                return;
+            }
+
+            // 選択されたモデル名に一致するモデルを検索
+            const selectedModel = modelData.find(model => model.name === modelName);
+            
+            if (selectedModel) {
+                // スタイル名のセレクトボックスをクリア
+                styleSelect.innerHTML = '<option value="">スタイルを選択してください</option>';
+                
+                // スタイル名のオプションを追加
+                selectedModel.styles.forEach(style => {
+                    const option = document.createElement('option');
+                    option.value = style.name;
+                    option.textContent = style.name;
+                    styleSelect.appendChild(option);
+                });
+                
+                styleSelect.disabled = false;
+            } else {
+                styleSelect.innerHTML = '<option value="">モデルを選択してください</option>';
+                styleSelect.disabled = true;
+            }
+        });
+
+        // ページ読み込み時にスピーカー情報を取得
+        loadSpeakerData();
+
         document.getElementById('synthesize-button').addEventListener('click', async () => {
             try {
                 const modelName = document.getElementById('model-name').value;
                 const styleName = document.getElementById('style-name').value;
                 const scriptText = document.getElementById('script-text').value;
                 
-                // スピーカー情報の取得
-                const response = await fetch('http://127.0.0.1:10101/speakers');
-                const data = await response.json();
+                // ボタンを無効化
+                const synthesizeButton = document.getElementById('synthesize-button');
+                const cancelButton = document.getElementById('cancel-button');
+                synthesizeButton.disabled = true;
+                cancelButton.style.display = 'block';
+                
+                // 中断用のAbortControllerを初期化
+                abortController = new AbortController();
+                
+                // 音声プレーヤーエリアにローディング表示
+                const audioContainer = document.getElementById('audio-container');
+                audioContainer.innerHTML = `
+                    <div class="audio-section">
+                        <h3>AivisSpeech Engine</h3>
+                        <div class="loading">
+                            <div class="loading-spinner"></div>
+                        </div>
+                    </div>
+                    <div class="audio-section">
+                        <h3>Style-Bert-VITS</h3>
+                        <div class="loading">
+                            <div class="loading-spinner"></div>
+                        </div>
+                    </div>
+                `;
                 
                 // モデル名とスタイル名に一致するIDとインデックスを抽出
-                const matchingResults = data.filter(model => 
+                const matchingResults = modelData.filter(model => 
                     model.name === modelName && 
                     model.styles.some(style => style.name === styleName)
                 ).map(model => {
@@ -70,7 +158,6 @@
                 }
 
                 const speakerId = matchingResults[0].id;
-                const styleIndex = matchingResults[0].index;
                 
                 // 処理時間の計測開始
                 const startTime = performance.now();
@@ -79,11 +166,13 @@
                 const [aivisResult, styleBertResult] = await Promise.all([
                     // AivisSpeech Engine
                     (async () => {
+                        const aivisStartTime = performance.now();
                         const queryResponse = await fetch(`http://127.0.0.1:10101/audio_query?speaker=${speakerId}&text=${encodeURIComponent(scriptText)}`, {
                             method: 'POST',
                             headers: {
                                 'Content-Type': 'application/json'
-                            }
+                            },
+                            signal: abortController.signal
                         });
                         
                         if (!queryResponse.ok) {
@@ -97,35 +186,43 @@
                             headers: {
                                 'Content-Type': 'application/json'
                             },
-                            body: JSON.stringify(queryData)
+                            body: JSON.stringify(queryData),
+                            signal: abortController.signal
                         });
 
                         if (!synthesisResponse.ok) {
                             throw new Error('音声合成に失敗しました');
                         }
 
-                        return await synthesisResponse.blob();
+                        const result = await synthesisResponse.blob();
+                        const aivisEndTime = performance.now();
+                        return {
+                            blob: result,
+                            processingTime: (aivisEndTime - aivisStartTime).toFixed(2)
+                        };
                     })(),
                     
                     // Style-Bert-VITS
                     (async () => {
-                        const response = await fetch('http://127.0.0.1:5000', {
+                        const styleBertStartTime = performance.now();
+                        const response = await fetch(`http://127.0.0.1:5000/voice?model_name=${modelName}&style=${styleName}&text=${encodeURIComponent(scriptText)}`, {
                             method: 'POST',
                             headers: {
-                                'Content-Type': 'application/json'
+                                'accept': 'audio/wav'
                             },
-                            body: JSON.stringify({
-                                model_name: modelName,
-                                model_id: styleIndex,
-                                text: scriptText
-                            })
+                            signal: abortController.signal
                         });
 
                         if (!response.ok) {
                             throw new Error('Style-Bert-VITSの音声合成に失敗しました');
                         }
 
-                        return await response.blob();
+                        const result = await response.blob();
+                        const styleBertEndTime = performance.now();
+                        return {
+                            blob: result,
+                            processingTime: (styleBertEndTime - styleBertStartTime).toFixed(2)
+                        };
                     })()
                 ]);
 
@@ -134,24 +231,29 @@
                 const processingTime = (endTime - startTime).toFixed(2);
 
                 // 音声プレーヤーの表示
-                const audioContainer = document.getElementById('audio-container');
                 audioContainer.innerHTML = `
                     <div class="audio-section">
                         <h3>AivisSpeech Engine</h3>
                         <audio controls>
-                            <source src="${URL.createObjectURL(aivisResult)}" type="audio/wav">
+                            <source src="${URL.createObjectURL(aivisResult.blob)}" type="audio/wav">
                             お使いのブラウザは音声再生に対応していません。
                         </audio>
+                        <div class="processing-time">処理時間: ${aivisResult.processingTime}ms</div>
                     </div>
                     <div class="audio-section">
                         <h3>Style-Bert-VITS</h3>
                         <audio controls>
-                            <source src="${URL.createObjectURL(styleBertResult)}" type="audio/wav">
+                            <source src="${URL.createObjectURL(styleBertResult.blob)}" type="audio/wav">
                             お使いのブラウザは音声再生に対応していません。
                         </audio>
+                        <div class="processing-time">処理時間: ${styleBertResult.processingTime}ms</div>
                     </div>
-                    <div class="processing-time">処理時間: ${processingTime}ms</div>
                 `;
+
+                // ボタンを有効化
+                synthesizeButton.disabled = false;
+                cancelButton.style.display = 'none';
+                abortController = null;
 
                 // レスポンスコンテナをクリア
                 document.getElementById('response-container').innerHTML = '';
@@ -160,6 +262,10 @@
                 console.error('エラーが発生しました:', error);
                 document.getElementById('response-container').innerHTML = 
                     '<div class="error">エラーが発生しました。APIサーバーが起動しているか確認してください。</div>';
+                // エラー時もボタンを有効化
+                document.getElementById('synthesize-button').disabled = false;
+                document.getElementById('cancel-button').style.display = 'none';
+                abortController = null;
             }
         });
     </script>
