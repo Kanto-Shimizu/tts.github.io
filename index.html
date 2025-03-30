@@ -1,1 +1,167 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TTS 速度比較</title>
+    <link rel="stylesheet" href="css/base.css">
+</head>
+<body>
+    <div class="container">
+        <h1 class="title">TTS 速度比較</h1>
+        <div class="input-group">
+            <div class="input-field">
+                <label for="model-name">モデル名</label>
+                <input type="text" id="model-name" name="model-name">
+            </div>
+            <div class="input-field">
+                <label for="style-name">スタイル名</label>
+                <input type="text" id="style-name" name="style-name">
+            </div>
+        </div>
+        <div class="script-container">
+            <label for="script-text">スクリプト</label>
+            <textarea id="script-text" name="script-text" rows="5"></textarea>
+        </div>
+        <div class="button-container">
+            <button id="synthesize-button" class="synthesize-button">
+                音声合成
+            </button>
+        </div>
+        <div id="response-container" class="response-container">
+            <!-- レスポンスがここに表示されます -->
+        </div>
+        <div id="audio-container" class="audio-container">
+            <!-- 音声プレーヤーがここに表示されます -->
+        </div>
+    </div>
 
+    <script>
+        document.getElementById('synthesize-button').addEventListener('click', async () => {
+            try {
+                const modelName = document.getElementById('model-name').value;
+                const styleName = document.getElementById('style-name').value;
+                const scriptText = document.getElementById('script-text').value;
+                
+                // スピーカー情報の取得
+                const response = await fetch('http://127.0.0.1:10101/speakers');
+                const data = await response.json();
+                
+                // モデル名とスタイル名に一致するIDとインデックスを抽出
+                const matchingResults = data.filter(model => 
+                    model.name === modelName && 
+                    model.styles.some(style => style.name === styleName)
+                ).map(model => {
+                    const styleIndex = model.styles.findIndex(style => style.name === styleName);
+                    const matchingStyle = model.styles.find(style => style.name === styleName);
+                    return {
+                        id: matchingStyle.id,
+                        index: styleIndex
+                    };
+                });
+                
+                if (matchingResults.length === 0) {
+                    document.getElementById('response-container').innerHTML = `
+                        <div class="error">
+                            モデル名「${modelName}」とスタイル名「${styleName}」に一致する情報が見つかりませんでした。
+                        </div>
+                    `;
+                    return;
+                }
+
+                const speakerId = matchingResults[0].id;
+                const styleIndex = matchingResults[0].index;
+                
+                // 処理時間の計測開始
+                const startTime = performance.now();
+                
+                // 両方のAPIに並列でリクエストを送信
+                const [aivisResult, styleBertResult] = await Promise.all([
+                    // AivisSpeech Engine
+                    (async () => {
+                        const queryResponse = await fetch(`http://127.0.0.1:10101/audio_query?speaker=${speakerId}&text=${encodeURIComponent(scriptText)}`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            }
+                        });
+                        
+                        if (!queryResponse.ok) {
+                            throw new Error('音声クエリの取得に失敗しました');
+                        }
+
+                        const queryData = await queryResponse.json();
+
+                        const synthesisResponse = await fetch(`http://127.0.0.1:10101/synthesis?speaker=${speakerId}`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify(queryData)
+                        });
+
+                        if (!synthesisResponse.ok) {
+                            throw new Error('音声合成に失敗しました');
+                        }
+
+                        return await synthesisResponse.blob();
+                    })(),
+                    
+                    // Style-Bert-VITS
+                    (async () => {
+                        const response = await fetch('http://127.0.0.1:5000', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                model_name: modelName,
+                                model_id: styleIndex,
+                                text: scriptText
+                            })
+                        });
+
+                        if (!response.ok) {
+                            throw new Error('Style-Bert-VITSの音声合成に失敗しました');
+                        }
+
+                        return await response.blob();
+                    })()
+                ]);
+
+                // 処理時間の計測終了
+                const endTime = performance.now();
+                const processingTime = (endTime - startTime).toFixed(2);
+
+                // 音声プレーヤーの表示
+                const audioContainer = document.getElementById('audio-container');
+                audioContainer.innerHTML = `
+                    <div class="audio-section">
+                        <h3>AivisSpeech Engine</h3>
+                        <audio controls>
+                            <source src="${URL.createObjectURL(aivisResult)}" type="audio/wav">
+                            お使いのブラウザは音声再生に対応していません。
+                        </audio>
+                    </div>
+                    <div class="audio-section">
+                        <h3>Style-Bert-VITS</h3>
+                        <audio controls>
+                            <source src="${URL.createObjectURL(styleBertResult)}" type="audio/wav">
+                            お使いのブラウザは音声再生に対応していません。
+                        </audio>
+                    </div>
+                    <div class="processing-time">処理時間: ${processingTime}ms</div>
+                `;
+
+                // レスポンスコンテナをクリア
+                document.getElementById('response-container').innerHTML = '';
+
+            } catch (error) {
+                console.error('エラーが発生しました:', error);
+                document.getElementById('response-container').innerHTML = 
+                    '<div class="error">エラーが発生しました。APIサーバーが起動しているか確認してください。</div>';
+            }
+        });
+    </script>
+</body>
+</html>
